@@ -1,105 +1,131 @@
+
 #!/usr/bin/env python3
 
-from flask import request, session, jsonify
+from flask import request, session
 from flask_restful import Resource
 from sqlalchemy.exc import IntegrityError
-from werkzeug.security import generate_password_hash, check_password_hash
 
 from config import app, db, api
 from models import User, Recipe
 
+@app.before_request
+def check_if_logged_in():
+    open_access_list = [
+        'signup',
+        'login',
+        'check_session'
+    ]
+
+    if (request.endpoint) not in open_access_list and (not session.get('user_id')):
+        return {'error': '401 Unauthorized'}, 401
+
 
 class Signup(Resource):
+    
     def post(self):
-        '''Create a new user account.'''
-        data = request.get_json()
+
+        request_json = request.get_json()
+
+        username = request_json.get('username')
+        password = request_json.get('password')
+        image_url = request_json.get('image_url')
+        bio = request_json.get('bio')
+
         user = User(
-            username=data['username'],
-            password_hash=generate_password_hash(data['password']),
-            bio=data['bio'],
-            image_url=data['image_url']
+            username=username,
+            image_url=image_url,
+            bio=bio
         )
+
+        # the setter will encrypt this
+        user.password_hash = password
+
         try:
+
             db.session.add(user)
             db.session.commit()
-            return {'id': user.id}, 201
+
+            session['user_id'] = user.id
+
+            return user.to_dict(), 201
+
         except IntegrityError:
-            return {'message': 'Username already taken'}, 400
 
-
+            return {'error': '422 Unprocessable Entity'}, 422
 
 class CheckSession(Resource):
-    def get(self):
-        '''Check if the user is logged in (i.e., has an active session).'''
-        if 'user_id' not in session:
-            return {'message': 'Unauthorized'}, 401
 
-        user = User.query.get(session['user_id'])
-        return jsonify({
-            'id': user.id,
-            'username': user.username,
-            'bio': user.bio,
-            'image_url': user.image_url
-        })
+    def get(self):
+        
+        user_id = session['user_id']
+        if user_id:
+            user = User.query.filter(User.id == user_id).first()
+            return user.to_dict(), 200
+        
+        return {}, 401
 
 
 class Login(Resource):
+    
     def post(self):
-        '''Login the user.'''
-        data = request.get_json()
-        
-        # Find user by username
-        user = User.query.filter_by(username=data['username']).first()
-        
-        if user and check_password_hash(user.password_hash, data['password']):
-            session['user_id'] = user.id
-            return {'username': user.username}, 200
-        return {'message': 'Invalid credentials'}, 401
 
+        request_json = request.get_json()
+
+        username = request_json.get('username')
+        password = request_json.get('password')
+
+        user = User.query.filter(User.username == username).first()
+
+        if user:
+            if user.authenticate(password):
+
+                session['user_id'] = user.id
+                return user.to_dict(), 200
+
+        return {'error': '401 Unauthorized'}, 401
 
 class Logout(Resource):
-    def delete(self):
-        '''Logout the user.'''
-        session.pop('user_id', None)
-        return {'message': 'Logged out successfully'}, 200
 
+    def delete(self):
+
+        session['user_id'] = None
+        
+        return {}, 204
+        
 
 class RecipeIndex(Resource):
+
     def get(self):
-        '''Get all recipes associated with the logged-in user.'''
-        if 'user_id' not in session:
-            return {'message': 'Unauthorized'}, 401
 
-        user = User.query.get(session['user_id'])
-        recipes = Recipe.query.filter_by(user_id=user.id).all()
-
-        recipes_list = [
-            {'title': recipe.title, 'instructions': recipe.instructions, 'minutes_to_complete': recipe.minutes_to_complete}
-            for recipe in recipes
-        ]
-        return jsonify(recipes_list)
-
+        user = User.query.filter(User.id == session['user_id']).first()
+        return [recipe.to_dict() for recipe in user.recipes], 200
+        
+        
     def post(self):
-        '''Create a new recipe.'''
-        if 'user_id' not in session:
-            return {'message': 'Unauthorized'}, 401
-        
-        data = request.get_json()
-        
-        if not data.get('title') or not data.get('instructions') or not data.get('minutes_to_complete'):
-            return {'message': 'Title, instructions, and minutes to complete are required'}, 422
 
-        user = User.query.get(session['user_id'])
-        new_recipe = Recipe(
-            title=data['title'],
-            instructions=data['instructions'],
-            minutes_to_complete=data['minutes_to_complete'],
-            user_id=user.id
-        )
-        db.session.add(new_recipe)
-        db.session.commit()
+        request_json = request.get_json()
 
-        return {'title': new_recipe.title, 'instructions': new_recipe.instructions, 'minutes_to_complete': new_recipe.minutes_to_complete}, 201
+        title = request_json['title']
+        instructions = request_json['instructions']
+        minutes_to_complete = request_json['minutes_to_complete']
+
+        try:
+
+            recipe = Recipe(
+                title=title,
+                instructions=instructions,
+                minutes_to_complete=minutes_to_complete,
+                user_id=session['user_id'],
+            )
+
+            db.session.add(recipe)
+            db.session.commit()
+
+            return recipe.to_dict(), 201
+
+        except IntegrityError:
+
+            return {'error': '422 Unprocessable Entity'}, 422
 
 
 api.add_resource(Signup, '/signup', endpoint='signup')
